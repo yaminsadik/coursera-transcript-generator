@@ -4,15 +4,18 @@ dynamic = ["version"]
 description = "CLI tool to extract Coursera course transcripts/subtitles"
 readme = "README.md"
 authors = [
-  { name="Kavin", email="your-email@example.com" }
+  { name = "Kavin" },
+  { name = "Sadik Yamin" },
 ]
 license = { text = "MIT" }
 requires-python = ">=3.10"
+keywords = ["coursera", "subtitles", "transcripts", "cli"]
 classifiers = [
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
     "License :: OSI Approved :: MIT License",
     "Operating System :: OS Independent",
     "Environment :: Console",
@@ -21,6 +24,18 @@ dependencies = [
     "requests>=2.31.0",
     "rich>=13.0.0",
 ]
+
+[project.optional-dependencies]
+dev = [
+  "build>=1.2.2",
+  "ruff>=0.16.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/yaminsadik/coursera-transcript-generator"
+Documentation = "https://github.com/yaminsadik/coursera-transcript-generator#readme"
+Issues = "https://github.com/yaminsadik/coursera-transcript-generator/issues"
+Source = "https://github.com/yaminsadik/coursera-transcript-generator"
 
 [project.scripts]
 coursera-transcripts = "coursera_transcripts.cli:main"
@@ -31,3 +46,13 @@ build-backend = "setuptools.build_meta"
 
 [tool.setuptools.dynamic]
 version = {attr = "coursera_transcripts.__version__"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.ruff]
+line-length = 88
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F", "I", "B", "BLE", "SIM"]

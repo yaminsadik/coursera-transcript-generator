@@ -3,14 +3,12 @@ name: Publish to PyPI
 on:
   push:
     tags:
-      - 'v*' # Triggers workflow when you push a tag like v0.1.3
+      - "v*"
 
 jobs:
   pypi-publish:
     name: Build and publish to PyPI
     runs-on: ubuntu-latest
-    
-    # REQUIRED: Gives GitHub permission to authenticate with PyPI via OIDC
     permissions:
       id-token: write
       contents: read
