@@ -1,5 +1,5 @@
 import argparse
-import sys
+import os
 from pathlib import Path
 
 from rich.console import Console
@@ -8,20 +8,22 @@ from rich.prompt import Prompt
 from rich.text import Text
 from rich.theme import Theme
 
+from . import __version__
 from .api import CourseAPI
 from .downloader import TranscriptDownloader
-from . import __version__
 
 # ── Custom theme ──────────────────────────────────────────────────────
-custom_theme = Theme({
-    "brand":    "bold bright_cyan",
-    "accent":   "bright_magenta",
-    "success":  "bold bright_green",
-    "warning":  "bold yellow",
-    "error":    "bold red",
-    "muted":    "dim white",
-    "info":     "bright_blue",
-})
+custom_theme = Theme(
+    {
+        "brand": "bold bright_cyan",
+        "accent": "bright_magenta",
+        "success": "bold bright_green",
+        "warning": "bold yellow",
+        "error": "bold red",
+        "muted": "dim white",
+        "info": "bright_blue",
+    }
+)
 
 console = Console(theme=custom_theme)
 
@@ -64,7 +66,10 @@ def _prompt_cookie() -> str:
             padding=(1, 2),
         )
     )
-    cookie = Prompt.ask("[bright_cyan]  ›[/bright_cyan] [bold]Cookie / CAUTH[/bold]")
+    cookie = Prompt.ask(
+        "[bright_cyan]  ›[/bright_cyan] [bold]Cookie / CAUTH[/bold]",
+        password=True,
+    )
     if not cookie.strip():
         console.print("[error]  ✖  Cookie cannot be empty.[/error]")
         raise SystemExit(1)
@@ -120,20 +125,24 @@ def parse_args():
         description="Download transcripts/subtitles from a Coursera course",
     )
     parser.add_argument(
-        "--cookie", "-c",
-        help="Coursera authentication cookie (CAUTH value). If omitted, you will be prompted.",
+        "--cookie",
+        "-c",
+        help="Coursera authentication cookie (prefer COURSERA_CAUTH or the hidden prompt).",
     )
     parser.add_argument(
-        "--slug", "-s",
+        "--slug",
+        "-s",
         help="Course slug (e.g. 'unreal-engine-fundamentals'). If omitted, you will be prompted.",
     )
     parser.add_argument(
-        "--output", "-o",
+        "--output",
+        "-o",
         default=None,
         help="Parent output directory (default: ./output). Transcripts saved to {output}/{slug}/",
     )
     parser.add_argument(
-        "--language", "-l",
+        "--language",
+        "-l",
         default=None,
         help="Subtitle language code (default: en)",
     )
@@ -148,16 +157,17 @@ def parse_args():
 
 def main():
     args = parse_args()
+    configured_cookie = args.cookie or os.environ.get("COURSERA_CAUTH")
 
     # ── Interactive mode when cookie/slug not provided ────────────────
-    interactive = args.cookie is None or args.slug is None
+    interactive = configured_cookie is None or args.slug is None
 
     if interactive:
         _show_banner()
 
     # Cookie
-    if args.cookie:
-        cookie = _normalize_cookie(args.cookie)
+    if configured_cookie:
+        cookie = _normalize_cookie(configured_cookie)
     else:
         cookie = _prompt_cookie()
 
@@ -165,7 +175,9 @@ def main():
     slug = args.slug if args.slug else _prompt_slug()
 
     # Options
-    if interactive and (args.language is None and args.format is None and args.output is None):
+    if interactive and (
+        args.language is None and args.format is None and args.output is None
+    ):
         language, fmt, output_dir = _prompt_options()
     else:
         language = args.language or "en"
@@ -192,7 +204,8 @@ def main():
     except KeyboardInterrupt:
         console.print("\n[warning]  ⚠  Interrupted by user.[/warning]")
         raise SystemExit(130)
-    except Exception as e:
+    # The CLI boundary converts unexpected library errors into a concise exit.
+    except Exception as e:  # noqa: BLE001
         console.print(f"\n[error]  ✖  Unexpected error: {e}[/error]")
         raise SystemExit(1)
 

@@ -1,9 +1,11 @@
+from __future__ import annotations
+
 import time
+from email.utils import parsedate_to_datetime
+from urllib.parse import urljoin, urlparse
+
 import requests
-from urllib.parse import urljoin
-
 from rich.console import Console
-
 
 COURSERA_BASE = "https://www.coursera.org"
 COURSERA_VERSION = "e184c443bbe09b70cbcebf2ba22b3b1067d7e119"
@@ -18,9 +20,10 @@ HEADERS = {
 }
 
 
-def _build_headers(cookie: str, referer: str | None = None) -> dict:
+def _build_headers(cookie: str | None, referer: str | None = None) -> dict:
     headers = HEADERS.copy()
-    headers["Cookie"] = cookie
+    if cookie:
+        headers["Cookie"] = cookie
     if referer:
         headers["Referer"] = referer
     return headers
@@ -32,35 +35,68 @@ class CourseAPI:
         self.session = requests.Session()
         self.console = console or Console()
 
-    def _get(self, url: str, referer: str | None = None, max_retries: int = 3) -> requests.Response:
-        headers = _build_headers(self.cookie, referer)
+    def _get(
+        self,
+        url: str,
+        referer: str | None = None,
+        max_retries: int = 3,
+        params: dict | None = None,
+        authenticated: bool = True,
+    ) -> requests.Response:
+        headers = _build_headers(self.cookie if authenticated else None, referer)
         last_exception: Exception | None = None
         for attempt in range(max_retries):
             try:
-                response = self.session.get(url, headers=headers, timeout=30)
+                response = self.session.get(
+                    url, headers=headers, params=params, timeout=30
+                )
                 response.raise_for_status()
                 return response
             except requests.exceptions.RequestException as e:
                 last_exception = e
+                if isinstance(e, requests.exceptions.HTTPError):
+                    status = e.response.status_code if e.response is not None else None
+                    if status not in {408, 429, 500, 502, 503, 504}:
+                        raise
                 if attempt == max_retries - 1:
                     break
-                wait = 2 ** attempt
+                wait = self._retry_delay(getattr(e, "response", None), attempt)
                 self.console.print(
-                    f"  [warning]⟳  Request failed, retrying in {wait}s…[/warning] [muted]({e})[/muted]"
+                    f"  [yellow]⟳  Request failed, retrying in {wait}s…[/yellow] [dim]({e})[/dim]"
                 )
                 time.sleep(wait)
         raise last_exception  # type: ignore[misc]
 
-    def get_course_materials(self, slug: str) -> dict:
-        url = (
-            f"{COURSERA_BASE}/api/onDemandCourseMaterials.v2/"
-            f"?q=slug&slug={slug}"
-            f"&includes=modules%2Clessons%2CpassableItemGroups%2CpassableItemGroupChoices%2CpassableLessonElements%2Citems%2Ctracks%2CgradePolicy%2CgradingParameters%2CembeddedContentMapping"
-            f"&fields=moduleIds%2ConDemandCourseMaterialModules.v1(name%2Cslug%2Cdescription%2CtimeCommitment%2ClessonIds%2Coptional%2ClearningObjectives)%2ConDemandCourseMaterialLessons.v1(name%2Cslug%2CtimeCommitment%2CelementIds%2Coptional%2CtrackId)%2ConDemandCourseMaterialPassableItemGroups.v1(requiredPassedCount%2CpassableItemGroupChoiceIds%2CtrackId)%2ConDemandCourseMaterialPassableItemGroupChoices.v1(name%2Cdescription%2CitemIds)%2ConDemandCourseMaterialPassableLessonElements.v1(gradingWeight%2CisRequiredForPassing)%2ConDemandCourseMaterialItems.v2(name%2CoriginalName%2Cslug%2CtimeCommitment%2CcontentSummary%2CisLocked%2ClockableByItem%2CitemLockedReasonCode%2CtrackId%2ClockedStatus%2CitemLockSummary%2CcustomDisplayTypenameOverride)%2ConDemandCourseMaterialTracks.v1(passablesCount)%2ConDemandGradingParameters.v1(gradedAssignmentGroups)%2CcontentAtomRelations.v1(embeddedContentSourceCourseId%2CsubContainerId)"
-            f"&showLockedItems=true"
+    @staticmethod
+    def _retry_delay(response: requests.Response | None, attempt: int) -> float:
+        retry_after = (
+            response.headers.get("Retry-After") if response is not None else None
         )
+        if retry_after:
+            try:
+                return max(0, min(float(retry_after), 30))
+            except ValueError:
+                try:
+                    delay = (
+                        parsedate_to_datetime(retry_after)
+                        - parsedate_to_datetime(response.headers["Date"])
+                    ).total_seconds()
+                    return max(0, min(delay, 30))
+                except (KeyError, TypeError, ValueError):
+                    pass
+        return float(2**attempt)
+
+    def get_course_materials(self, slug: str) -> dict:
+        url = f"{COURSERA_BASE}/api/onDemandCourseMaterials.v2/"
+        params = {
+            "q": "slug",
+            "slug": slug,
+            "includes": "modules,lessons,passableItemGroups,passableItemGroupChoices,passableLessonElements,items,tracks,gradePolicy,gradingParameters,embeddedContentMapping",
+            "fields": "name,slug,moduleIds,onDemandCourseMaterialModules.v1(name,slug,description,timeCommitment,lessonIds,optional,learningObjectives),onDemandCourseMaterialLessons.v1(name,slug,timeCommitment,elementIds,optional,trackId),onDemandCourseMaterialPassableItemGroups.v1(requiredPassedCount,passableItemGroupChoiceIds,trackId),onDemandCourseMaterialPassableItemGroupChoices.v1(name,description,itemIds),onDemandCourseMaterialPassableLessonElements.v1(gradingWeight,isRequiredForPassing),onDemandCourseMaterialItems.v2(name,originalName,slug,timeCommitment,contentSummary,isLocked,optional,lockableByItem,itemLockedReasonCode,trackId,lockedStatus,itemLockSummary,customDisplayTypenameOverride),onDemandCourseMaterialTracks.v1(passablesCount),onDemandGradingParameters.v1(gradedAssignmentGroups),contentAtomRelations.v1(embeddedContentSourceCourseId,subContainerId)",
+            "showLockedItems": "true",
+        }
         referer = f"{COURSERA_BASE}/learn/{slug}/home/module/1"
-        response = self._get(url, referer)
+        response = self._get(url, referer, params=params)
         data = response.json()
 
         if not data.get("elements"):
@@ -81,5 +117,10 @@ class CourseAPI:
 
     def download_subtitle(self, relative_url: str) -> str:
         url = urljoin(COURSERA_BASE, relative_url)
-        response = self._get(url)
+        hostname = (urlparse(url).hostname or "").lower()
+        authenticated = hostname == "coursera.org" or hostname.endswith(".coursera.org")
+        response = self._get(url, authenticated=authenticated)
+        content_type = response.headers.get("Content-Type", "").lower()
+        if "text/html" in content_type:
+            raise ValueError("Subtitle request returned an HTML page")
         return response.text

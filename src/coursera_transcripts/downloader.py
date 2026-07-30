@@ -1,66 +1,26 @@
-import re
-import time
+from __future__ import annotations
+
+from datetime import datetime, timezone
 from pathlib import Path
 
 from rich.console import Console
+from rich.markup import escape
 from rich.panel import Panel
 from rich.progress import (
+    BarColumn,
+    MofNCompleteColumn,
     Progress,
     SpinnerColumn,
     TextColumn,
-    BarColumn,
-    MofNCompleteColumn,
     TimeElapsedColumn,
 )
 from rich.table import Table
-from rich.text import Text
 from rich.tree import Tree
 
 from .api import CourseAPI
-
-
-def _sanitize_filename(name: str) -> str:
-    name = re.sub(r'[<>:"/\\|?*]', '', name)
-    name = name.strip()
-    name = name[:200]
-    return name
-
-
-def _extract_course_id(materials_data: dict) -> str:
-    return materials_data["elements"][0]["id"]
-
-
-def _build_module_lookup(materials_data: dict) -> dict:
-    lookup = {}
-    for module in materials_data.get("linked", {}).get("onDemandCourseMaterialModules.v1", []):
-        lookup[module["id"]] = {
-            "name": module["name"],
-            "slug": module.get("slug", module["id"]),
-        }
-    return lookup
-
-
-def _build_lesson_lookup(materials_data: dict) -> dict:
-    lookup = {}
-    for lesson in materials_data.get("linked", {}).get("onDemandCourseMaterialLessons.v1", []):
-        lookup[lesson["id"]] = {
-            "name": lesson["name"],
-            "slug": lesson.get("slug", lesson["id"]),
-        }
-    return lookup
-
-
-def _get_lecture_items(materials_data: dict) -> list:
-    items = materials_data.get("linked", {}).get("onDemandCourseMaterialItems.v2", [])
-    lectures = []
-    for item in items:
-        content_type = item.get("contentSummary", {}).get("typeName", "")
-        if content_type != "lecture":
-            continue
-        if item.get("isLocked", False):
-            continue
-        lectures.append(item)
-    return lectures
+from .hierarchy import build_course_catalog
+from .models import Course, Lecture
+from .storage import TranscriptStorage
 
 
 class TranscriptDownloader:
@@ -82,157 +42,274 @@ class TranscriptDownloader:
         videos = video_data.get("linked", {}).get("onDemandVideos.v1", [])
         if not videos:
             return None
+        subtitle_field = "subtitlesTxt" if self.fmt == "txt" else "subtitles"
+        return videos[0].get(subtitle_field, {}).get(self.language)
 
-        video = videos[0]
+    def _validate_subtitle(self, text: str) -> None:
+        stripped = text.strip()
+        if not stripped:
+            raise ValueError("Downloaded subtitle is empty")
+        lowered = stripped[:500].lower()
+        if "<html" in lowered or "<!doctype html" in lowered:
+            raise ValueError("Downloaded subtitle appears to be an HTML page")
+        if self.fmt == "srt" and "-->" not in stripped:
+            raise ValueError("Downloaded subtitle is not valid SRT content")
 
-        if self.fmt == "txt":
-            subtitles = video.get("subtitlesTxt", {})
-        else:
-            subtitles = video.get("subtitles", {})
-
-        return subtitles.get(self.language)
+    def _manifest_row(
+        self,
+        lecture: Lecture,
+        catalog_course: Course,
+        status: str,
+        path: str = "",
+        error: str = "",
+    ) -> dict:
+        return {
+            "course_name": catalog_course.name,
+            "course_slug": catalog_course.slug,
+            "module_id": lecture.module.id if lecture.module else "",
+            "module_name": lecture.module.name if lecture.module else "",
+            "module_slug": lecture.module.slug if lecture.module else "",
+            "module_position": lecture.module.position if lecture.module else "",
+            "lesson_id": lecture.lesson.id if lecture.lesson else "",
+            "lesson_name": lecture.lesson.name if lecture.lesson else "",
+            "lesson_slug": lecture.lesson.slug if lecture.lesson else "",
+            "lesson_position": lecture.lesson.position if lecture.lesson else "",
+            "video_name": lecture.name,
+            "video_id": lecture.id,
+            "video_slug": lecture.slug,
+            "video_position": lecture.position,
+            "content_type": lecture.content_type,
+            "time_commitment": lecture.time_commitment
+            if lecture.time_commitment is not None
+            else "",
+            "optional": lecture.optional,
+            "locked": lecture.locked,
+            "language": self.language,
+            "format": self.fmt,
+            "path": path,
+            "previous_path": "",
+            "status": status,
+            "error": error,
+        }
 
     def fetch_all_transcripts(self, course_slug: str) -> dict:
         c = self.console
-
-        # ── Fetch course data ─────────────────────────────────────────
-        with c.status("[bright_cyan]  Fetching course materials…[/bright_cyan]", spinner="dots"):
+        with c.status(
+            "[bright_cyan]  Fetching course materials…[/bright_cyan]", spinner="dots"
+        ):
             materials = self.api.get_course_materials(course_slug)
 
-        course_id = _extract_course_id(materials)
-        module_lookup = _build_module_lookup(materials)
-        lesson_lookup = _build_lesson_lookup(materials)
-        lecture_items = _get_lecture_items(materials)
+        catalog = build_course_catalog(materials, course_slug)
+        storage = TranscriptStorage(
+            self.output_dir, catalog.course, self.language, self.fmt
+        )
 
-        course_dir = self.output_dir / course_slug
-        course_dir.mkdir(parents=True, exist_ok=True)
-
-        # ── Course overview panel ─────────────────────────────────────
         info_table = Table.grid(padding=(0, 2))
-        info_table.add_column(style="muted", justify="right")
+        info_table.add_column(style="dim", justify="right")
         info_table.add_column(style="bold white")
-        info_table.add_row("Course", course_slug)
-        info_table.add_row("Lectures", str(len(lecture_items)))
-        info_table.add_row("Language", self.language.upper())
+        info_table.add_row("Course", escape(catalog.course.name))
+        info_table.add_row("Lectures", str(len(catalog.lectures)))
+        info_table.add_row("Language", escape(self.language.upper()))
         info_table.add_row("Format", self.fmt.upper())
-        info_table.add_row("Output", str(course_dir))
-
+        info_table.add_row("Output", escape(str(storage.course_dir)))
         c.print(
             Panel(
                 info_table,
-                title="[brand]📋  Course Overview[/brand]",
+                title="[bold bright_cyan]📋  Course Overview[/bold bright_cyan]",
                 border_style="bright_cyan",
                 padding=(1, 2),
             )
         )
         c.print()
 
-        if not lecture_items:
-            c.print("[warning]  ⚠  No lecture videos found in this course.[/warning]")
-            return {"success": 0, "skipped": 0, "failed": 0, "total": 0}
+        stats = {
+            "success": 0,
+            "skipped": 0,
+            "failed": 0,
+            "interrupted": 0,
+            "stale_archived": 0,
+            "total": len(catalog.lectures),
+        }
+        results: list[tuple[str, str, str]] = []
+        manifest_rows: list[dict] = []
+        interrupted = False
 
-        # ── Download with progress bar ────────────────────────────────
-        stats = {"success": 0, "skipped": 0, "failed": 0, "total": len(lecture_items)}
-        results: list[tuple[str, str, str]] = []  # (status_icon, name, detail)
+        if catalog.lectures:
+            try:
+                with Progress(
+                    SpinnerColumn(style="bright_cyan"),
+                    TextColumn("[bold]{task.description}[/bold]"),
+                    BarColumn(
+                        bar_width=30,
+                        style="dim white",
+                        complete_style="bright_cyan",
+                        finished_style="bright_green",
+                    ),
+                    MofNCompleteColumn(),
+                    TextColumn("•"),
+                    TimeElapsedColumn(),
+                    console=c,
+                    transient=False,
+                ) as progress:
+                    task = progress.add_task(
+                        "  Downloading transcripts", total=stats["total"]
+                    )
+                    for lecture in catalog.lectures:
+                        display_name = escape(lecture.name)
 
-        with Progress(
-            SpinnerColumn(style="bright_cyan"),
-            TextColumn("[bold]{task.description}[/bold]"),
-            BarColumn(
-                bar_width=30,
-                style="dim white",
-                complete_style="bright_cyan",
-                finished_style="bright_green",
-            ),
-            MofNCompleteColumn(),
-            TextColumn("•"),
-            TimeElapsedColumn(),
-            console=c,
-            transient=False,
-        ) as progress:
-            task = progress.add_task("  Downloading transcripts", total=stats["total"])
+                        if lecture.locked:
+                            reason = "Lecture is locked"
+                            stats["skipped"] += 1
+                            results.append(
+                                ("⊘", display_name, f"[yellow]{reason}[/yellow]")
+                            )
+                            manifest_rows.append(
+                                self._manifest_row(
+                                    lecture, catalog.course, "skipped", error=reason
+                                )
+                            )
+                            progress.advance(task)
+                            continue
 
-            for idx, item in enumerate(lecture_items, 1):
-                item_id = item["id"]
-                item_name = _sanitize_filename(item["name"])
-                module_id = item.get("moduleId", "")
+                        try:
+                            video_data = self.api.get_lecture_video(
+                                catalog.course.id, lecture.id
+                            )
+                            subtitle_url = self._get_subtitle_url(video_data)
+                            if not subtitle_url:
+                                reason = f"No {self.language} {self.fmt} subtitles"
+                                stats["skipped"] += 1
+                                results.append(
+                                    (
+                                        "⊘",
+                                        display_name,
+                                        f"[yellow]{escape(reason)}[/yellow]",
+                                    )
+                                )
+                                manifest_rows.append(
+                                    self._manifest_row(
+                                        lecture, catalog.course, "skipped", error=reason
+                                    )
+                                )
+                                progress.advance(task)
+                                continue
 
-                module_info = module_lookup.get(module_id, {})
-                module_slug = module_info.get("slug", f"module-{module_id}")
+                            subtitle_text = self.api.download_subtitle(subtitle_url)
+                            self._validate_subtitle(subtitle_text)
+                            path = storage.transcript_path(lecture)
+                            storage.write_transcript(path, subtitle_text)
+                            relative_path = storage.relative_path(path)
+                        # A single malformed lecture must not abort the course report.
+                        except Exception as exc:  # noqa: BLE001
+                            error = str(exc)
+                            stats["failed"] += 1
+                            results.append(
+                                ("❌", display_name, f"[red]{escape(error)}[/red]")
+                            )
+                            manifest_rows.append(
+                                self._manifest_row(
+                                    lecture, catalog.course, "failed", error=error
+                                )
+                            )
+                        else:
+                            stats["success"] += 1
+                            results.append(
+                                (
+                                    "✔",
+                                    display_name,
+                                    f"[dim]{escape(relative_path)}[/dim]",
+                                )
+                            )
+                            manifest_rows.append(
+                                self._manifest_row(
+                                    lecture,
+                                    catalog.course,
+                                    "downloaded",
+                                    path=relative_path,
+                                )
+                            )
+                        progress.advance(task)
+            except KeyboardInterrupt:
+                interrupted = True
+                processed_ids = {row["video_id"] for row in manifest_rows}
+                for lecture in catalog.lectures:
+                    if lecture.id in processed_ids:
+                        continue
+                    reason = "Download interrupted before this lecture completed"
+                    stats["interrupted"] += 1
+                    results.append(
+                        ("⚠", escape(lecture.name), f"[yellow]{reason}[/yellow]")
+                    )
+                    manifest_rows.append(
+                        self._manifest_row(
+                            lecture, catalog.course, "interrupted", error=reason
+                        )
+                    )
+        else:
+            c.print("[yellow]  ⚠  No lecture videos found in this course.[/yellow]")
 
-                module_dir = course_dir / module_slug
-                module_dir.mkdir(parents=True, exist_ok=True)
+        report = {
+            "schema_version": 1,
+            "generated_at": datetime.now(timezone.utc).isoformat(),
+            "run": {
+                "language": self.language,
+                "format": self.fmt,
+                "interrupted": interrupted,
+            },
+            "course": {
+                "id": catalog.course.id,
+                "name": catalog.course.name,
+                "slug": catalog.course.slug,
+            },
+            "summary": stats,
+            "transcripts": manifest_rows,
+        }
+        storage.write_manifests(report)
+        if not interrupted:
+            archived = storage.archive_stale_files(manifest_rows)
+            stats["stale_archived"] = len(archived)
+            report["stale_files_archived"] = archived
+            storage.write_manifests(report)
 
-                # Fetch video data
-                try:
-                    video_data = self.api.get_lecture_video(course_id, item_id)
-                except Exception as e:
-                    results.append(("❌", item_name, f"[error]Failed to fetch video data: {e}[/error]"))
-                    stats["failed"] += 1
-                    progress.advance(task)
-                    continue
+        if interrupted:
+            c.print(
+                f"[yellow]  ⚠  Partial manifests saved to {escape(str(storage.course_dir))}[/yellow]"
+            )
+            raise KeyboardInterrupt
 
-                subtitle_url = self._get_subtitle_url(video_data)
-
-                if not subtitle_url:
-                    results.append(("⊘", item_name, f"[warning]No {self.language} {self.fmt} subtitles[/warning]"))
-                    stats["skipped"] += 1
-                    progress.advance(task)
-                    continue
-
-                # Download subtitle
-                try:
-                    subtitle_text = self.api.download_subtitle(subtitle_url)
-                except Exception as e:
-                    results.append(("❌", item_name, f"[error]Download failed: {e}[/error]"))
-                    stats["failed"] += 1
-                    progress.advance(task)
-                    continue
-
-                filename = f"{item_name}.{self.fmt}"
-                filepath = module_dir / filename
-                filepath.write_text(subtitle_text, encoding="utf-8")
-
-                rel_path = filepath.relative_to(self.output_dir)
-                results.append(("✔", item_name, f"[muted]{rel_path}[/muted]"))
-                stats["success"] += 1
-                progress.advance(task)
-
-        # ── Results tree ──────────────────────────────────────────────
         c.print()
-
         tree = Tree("[bold bright_cyan]📂  Results[/bold bright_cyan]")
         for icon, name, detail in results:
-            if icon == "✔":
-                style_icon = f"[bright_green]{icon}[/bright_green]"
-            elif icon == "⊘":
-                style_icon = f"[yellow]{icon}[/yellow]"
-            else:
-                style_icon = f"[red]{icon}[/red]"
-            tree.add(f"{style_icon}  [bold]{name}[/bold]  {detail}")
+            color = (
+                "bright_green" if icon == "✔" else "yellow" if icon == "⊘" else "red"
+            )
+            tree.add(f"[{color}]{icon}[/{color}]  [bold]{name}[/bold]  {detail}")
         c.print(tree)
-
-        # ── Summary panel ─────────────────────────────────────────────
-        c.print()
 
         summary_parts = []
         if stats["success"]:
-            summary_parts.append(f"[bright_green]✔ {stats['success']} downloaded[/bright_green]")
+            summary_parts.append(
+                f"[bright_green]✔ {stats['success']} downloaded[/bright_green]"
+            )
         if stats["skipped"]:
             summary_parts.append(f"[yellow]⊘ {stats['skipped']} skipped[/yellow]")
         if stats["failed"]:
             summary_parts.append(f"[red]✖ {stats['failed']} failed[/red]")
-
+        if stats["stale_archived"]:
+            summary_parts.append(
+                f"[dim]♲ {stats['stale_archived']} stale files archived[/dim]"
+            )
+        if not summary_parts:
+            summary_parts.append("[dim]No lectures found[/dim]")
         summary_text = "   ".join(summary_parts)
-        summary_text += f"\n\n[muted]Files saved to [bold]{course_dir}[/bold][/muted]"
-
+        summary_text += f"\n\n[dim]Files and manifests saved to [bold]{escape(str(storage.course_dir))}[/bold][/dim]"
+        c.print()
         c.print(
             Panel(
                 summary_text,
-                title="[brand]✨  Summary[/brand]",
+                title="[bold bright_cyan]✨  Summary[/bold bright_cyan]",
                 border_style="bright_green" if not stats["failed"] else "yellow",
                 padding=(1, 2),
             )
         )
-
         return stats

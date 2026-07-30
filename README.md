@@ -14,7 +14,8 @@ A beautiful CLI tool to bulk-download transcripts and subtitles from any Courser
 
 - **Interactive prompts** — guided step-by-step experience, no need to memorize flags
 - **Bulk download** — grabs every lecture transcript in a course at once
-- **Organized output** — files are neatly sorted into module folders
+- **Organized output** — files are sorted by module and lesson, in course order
+- **Metadata manifests** — every run produces JSON and CSV download reports
 - **Progress tracking** — real-time progress bar with download status
 - **Retry logic** — automatic retries with exponential backoff on failures
 - **Multiple formats** — supports both `.txt` (plain text) and `.srt` (subtitle) formats
@@ -56,8 +57,8 @@ You'll be prompted for:
 Pass everything as flags for scripting / automation:
 
 ```bash
+export COURSERA_CAUTH="YOUR_CAUTH_VALUE"
 coursera-transcripts \
-  --cookie "YOUR_CAUTH_VALUE" \
   --slug "machine-learning" \
   --language en \
   --format txt \
@@ -68,7 +69,7 @@ coursera-transcripts \
 
 | Flag         | Short | Default      | Description                    |
 | ------------ | ----- | ------------ | ------------------------------ |
-| `--cookie`   | `-c`  | _(prompted)_ | CAUTH cookie value             |
+| `--cookie`   | `-c`  | env/prompt   | CAUTH cookie value             |
 | `--slug`     | `-s`  | _(prompted)_ | Course slug from URL           |
 | `--language` | `-l`  | `en`         | Subtitle language code         |
 | `--format`   |       | `txt`        | Output format (`txt` or `srt`) |
@@ -87,24 +88,46 @@ coursera-transcripts \
 > [!IMPORTANT]
 > You must be **enrolled** in the course to download its transcripts.
 
+The interactive cookie prompt hides its input. For automation, prefer the
+`COURSERA_CAUTH` environment variable over `--cookie`, which may expose the
+value in shell history or process listings.
+
 ---
 
 ## 📁 Output Structure
 
-Transcripts are organized by module:
+Transcripts are organized by module and lesson. Numeric prefixes preserve the
+course order, and the language is included in each filename:
 
 ```
 output/
 └── machine-learning/
-    ├── introduction-to-ml/
-    │   ├── Welcome to Machine Learning.txt
-    │   ├── What is Machine Learning.txt
-    │   └── Supervised Learning.txt
-    ├── linear-regression/
-    │   ├── Model Representation.txt
-    │   └── Cost Function.txt
-    └── ...
+    ├── manifest.json
+    ├── manifest.csv
+    ├── manifest.en.txt.json
+    ├── manifest.en.txt.csv
+    ├── 01-Introduction to Machine Learning/
+    │   └── 01-Getting Started/
+    │       ├── 001-Welcome to Machine Learning--abc123.en.txt
+    │       └── 002-What is Machine Learning--def456.en.txt
+    └── 02-Linear Regression/
+        └── 01-Models and Cost/
+            ├── 001-Model Representation--ghi789.en.txt
+            └── 002-Cost Function--jkl012.en.txt
 ```
+
+Transcript files contain the subtitle text returned by Coursera, unchanged.
+`manifest.json` and `manifest.csv` record course/module/lesson/video names, IDs,
+slugs and positions, plus language, duration, optional/locked flags, output
+path, download status, and any error for every lecture.
+
+The unqualified manifests describe the latest run. Language/format-specific
+manifests preserve each output set independently. On a completed repeat run,
+files recorded by the prior matching manifest but no longer belong at their
+old paths are moved into a timestamped `.stale/` archive. A failed refresh
+preserves the last successful file and records it as `previous_path`.
+Interrupted runs retain partial files and write an interrupted manifest
+without performing stale-file reconciliation.
 
 ---
 
