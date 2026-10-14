@@ -9,7 +9,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from .models import Course, Lecture
+from .models import Course, Lecture, TranscriptResult, TranscriptStatus
+from .reporting import MANIFEST_FIELDS
 
 _INVALID_COMPONENT = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
 _WINDOWS_RESERVED = {
@@ -117,8 +118,8 @@ class TranscriptStorage:
             return [row for row in rows if row.get("path")]
         return []
 
-    def archive_stale_files(self, current_rows: list[dict[str, Any]]) -> list[str]:
-        current_by_id = {row["video_id"]: row for row in current_rows}
+    def archive_stale_files(self, results: list[TranscriptResult]) -> list[str]:
+        current_by_id = {result.lecture.id: result for result in results}
         stale_paths: set[str] = set()
         for previous in self._previous_rows:
             video_id = previous.get("video_id")
@@ -127,12 +128,12 @@ class TranscriptStorage:
                 if video_id:
                     stale_paths.add(previous["path"])
             elif (
-                current["status"] == "downloaded"
-                and current["path"] != previous["path"]
+                current.status is TranscriptStatus.DOWNLOADED
+                and current.path != previous["path"]
             ):
                 stale_paths.add(previous["path"])
-            elif current["status"] != "downloaded":
-                current["previous_path"] = previous["path"]
+            elif current.status is not TranscriptStatus.DOWNLOADED:
+                current.previous_path = previous["path"]
 
         archived: list[str] = []
         archive_root = (
@@ -157,36 +158,7 @@ class TranscriptStorage:
         _atomic_write(self.course_dir / "manifest.json", json_content)
 
         rows = report["transcripts"]
-        fields = (
-            list(rows[0])
-            if rows
-            else [
-                "course_name",
-                "course_slug",
-                "module_id",
-                "module_name",
-                "module_slug",
-                "module_position",
-                "lesson_id",
-                "lesson_name",
-                "lesson_slug",
-                "lesson_position",
-                "video_name",
-                "video_id",
-                "video_slug",
-                "video_position",
-                "content_type",
-                "time_commitment",
-                "optional",
-                "locked",
-                "language",
-                "format",
-                "path",
-                "previous_path",
-                "status",
-                "error",
-            ]
-        )
+        fields = list(rows[0]) if rows else list(MANIFEST_FIELDS)
         for csv_path in (
             self.course_dir / f"{self._manifest_stem}.csv",
             self.course_dir / "manifest.csv",

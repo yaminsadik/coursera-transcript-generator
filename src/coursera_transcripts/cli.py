@@ -120,7 +120,7 @@ def _prompt_options() -> tuple[str, str, Path]:
     return language, fmt, Path(output).resolve()
 
 
-def parse_args():
+def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Download transcripts/subtitles from a Coursera course",
     )
@@ -155,7 +155,7 @@ def parse_args():
     return parser.parse_args()
 
 
-def main():
+def main() -> None:
     args = parse_args()
     configured_cookie = args.cookie or os.environ.get("COURSERA_CAUTH")
 
@@ -200,14 +200,14 @@ def main():
         downloader.fetch_all_transcripts(slug)
     except ValueError as e:
         console.print(f"\n[error]  ✖  {e}[/error]")
-        raise SystemExit(1)
+        raise SystemExit(1) from None
     except KeyboardInterrupt:
         console.print("\n[warning]  ⚠  Interrupted by user.[/warning]")
-        raise SystemExit(130)
+        raise SystemExit(130) from None
     # The CLI boundary converts unexpected library errors into a concise exit.
     except Exception as e:  # noqa: BLE001
         console.print(f"\n[error]  ✖  Unexpected error: {e}[/error]")
-        raise SystemExit(1)
+        raise SystemExit(1) from None
 
 
 if __name__ == "__main__":
